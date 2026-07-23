@@ -26,7 +26,9 @@ class Hledger < Formula
 
   depends_on "ghc" => :build
   depends_on "haskell-stack" => :build
+  depends_on "pkgconf" => :build
   depends_on "gmp"
+  depends_on "libyaml"
 
   uses_from_macos "libffi"
   uses_from_macos "ncurses"
@@ -36,21 +38,36 @@ class Hledger < Formula
   end
 
   def install
-    # Let `stack` handle its own parallelization
-    jobs = ENV.make_jobs
-    ENV.deparallelize
-
     args = %W[
+      --flag=libyaml:system-libyaml
       --local-bin-path=#{bin}
+      --jobs=#{ENV.make_jobs}
       --no-install-ghc
       --skip-ghc-check
       --system-ghc
     ]
-    args << "--ghc-options=-pie" if OS.linux? && Hardware::CPU.arm?
+    if OS.linux?
+      args << "--ghc-options=-pie"
 
-    system "stack", "-j#{jobs}", "install", *args
-    man1.install Dir["hledger*/*.1"]
-    info.install Dir["hledger*/*.info"]
+      # Using global configuration to apply options to all dependencies.
+      # -split-sections helps reduce installation size by over 50%.
+      everything_ghc_options = %w[-split-sections]
+      everything_ghc_options += %w[-fPIC -fexternal-dynamic-refs] unless Hardware::CPU.arm?
+      Pathname("#{Dir.home}/.stack/config.yaml").write <<~YAML
+        ghc-options:
+          "$everything": #{everything_ghc_options.join(" ")}
+      YAML
+    end
+
+    # Let `stack` handle its own parallelization
+    ENV.deparallelize { system "stack", "install", *args }
+
+    # Strip binaries to reduce size by ~100MB (~25%) on macOS. This has no impact on Linux. Also done upstream:
+    # https://github.com/simonmichael/hledger/blob/hledger-1.52.1/.github/workflows/binaries-mac-arm64.yml#L156-L158
+    system "strip", *bin.children if OS.mac?
+
+    man1.install Utils::Gzip.compress(*Dir["hledger*/*.1"])
+    info.install Utils::Gzip.compress(*Dir["hledger*/*.info"])
     bash_completion.install "hledger/shell-completion/hledger-completion.bash" => "hledger"
   end
 
